@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Installer>
+    <Name>System Info Tool</Name>
+    <Version>1.0.0</Version>
+    <Title>System Info Tool</Title>
+    <Publisher>System Info Tool</Publisher>
+    <StartMenuDir>System Info Tool</StartMenuDir>
+    <TargetDir>@HomeDir@/SystemInfoTool</TargetDir>
+    <InstallerWindowIcon>icon.png</InstallerWindowIcon>
+    <InstallerApplicationIcon>icon.png</InstallerApplicationIcon>
+    <Logo>logo.png</Logo>
+    <Watermark>watermark.png</Watermark>
+    <Banner>banner.png</Banner>
+    <Background>background.png</Background>
+    <AdminTargetDir>@rootDir@/SystemInfoTool</AdminTargetDir>
+    <RemoteRepositories>
+        <Repository>
+            <Url>http://localhost/repository</Url>
+        </Repository>
+    </RemoteRepositories>
+</Installer>

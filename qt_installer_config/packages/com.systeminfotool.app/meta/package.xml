@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Package>
+    <DisplayName>System Info Tool</DisplayName>
+    <Description>Cross-platform system information tool</Description>
+    <Version>1.0.0</Version>
+    <ReleaseDate>2026-08-30</ReleaseDate>
+    <Name>com.systeminfotool.app</Name>
+    <Default>true</Default>
+    <Script>installscript.qs</Script>
+    <Licenses>
+        <License name="MIT License" file="LICENSE.txt"/>
+    </Licenses>
+    <Dependencies></Dependencies>
+</Package>

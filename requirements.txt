@@ -1,0 +1,17 @@
+# Cross-platform (needed everywhere)
+psutil>=5.9
+customtkinter>=5.2
+
+# Windows only — deep hardware detail via the WMI COM interface
+# (NOT the deprecated wmic.exe binary). Install these only on Windows;
+# pip's environment markers below make `pip install -r requirements.txt`
+# skip them automatically on Linux/macOS.
+pywin32>=306; sys_platform == "win32"
+wmi>=1.5.1; sys_platform == "win32"
+
+# Optional, Linux only — nicer GPU/driver detail when present.
+# The app already degrades gracefully without these; they're not hard
+# requirements. Install via your distro's package manager instead of pip:
+#   Debian/Ubuntu: sudo apt install pciutils util-linux smartmontools
+#   Fedora:        sudo dnf install pciutils util-linux smartmontools
+#   Arch:          sudo pacman -S pciutils util-linux smartmontools
