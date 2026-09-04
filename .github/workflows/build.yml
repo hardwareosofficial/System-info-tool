@@ -33,10 +33,11 @@ jobs:
 
       - name: Run Inno Setup on Windows (optional)
         if: runner.os == 'Windows'
+        continue-on-error: true
         run: |
-          # Try to install Inno Setup (may require elevated permissions); don't fail the job if it can't be installed
+          # Try to install Inno Setup (may require elevated permissions); do not fail the job if it can't be installed
           try {
-            choco install innosetup -y -y
+            choco install innosetup -y
           } catch {
             Write-Host "choco install innosetup failed or requires elevation; skipping installer install"
           }
@@ -44,8 +45,12 @@ jobs:
           if (Test-Path "SystemInfoTool.iss") {
             $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
             if ($iscc) {
-              Write-Host "Found ISCC.exe — building installer..."
-              & ISCC.exe SystemInfoTool.iss
+              Write-Host "Found ISCC.exe — attempting to build installer (errors ignored)..."
+              try {
+                & ISCC.exe SystemInfoTool.iss
+              } catch {
+                Write-Host "ISCC.exe run failed; continuing without installer"
+              }
             } else {
               Write-Host "ISCC.exe not found on runner — skipping installer build"
             }
