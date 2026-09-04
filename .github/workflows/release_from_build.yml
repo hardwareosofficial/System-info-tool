@@ -1,0 +1,63 @@
+name: Create Release from Build Artifacts
+
+on:
+  workflow_run:
+    workflows: ["Build and Package"]
+    types:
+      - completed
+
+jobs:
+  release:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Prepare
+        uses: actions/checkout@v4
+
+      - name: List artifacts from triggering run
+        id: list_artifacts
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const run_id = context.payload.workflow_run.id
+            const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: run_id,
+            })
+            if (!artifacts || !artifacts.data || artifacts.data.artifacts.length === 0) {
+              core.info('No artifacts found on triggering workflow run')
+              return ''
+            }
+            // return newline-separated lines of id::name::archive_download_url
+            return artifacts.data.artifacts.map(a => `${a.id}::${a.name}::${a.archive_download_url}`).join('\n')
+
+      - name: Download and unpack artifacts
+        if: steps.list_artifacts.outputs.result != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p release_artifacts
+          echo "Artifacts list:\n${{ steps.list_artifacts.outputs.result }}"
+          while IFS= read -r line; do
+            id=$(echo "$line" | awk -F'::' '{print $1}')
+            name=$(echo "$line" | awk -F'::' '{print $2}')
+            url=$(echo "$line" | awk -F'::' '{print $3}')
+            echo "Downloading artifact $name (id=$id)"
+            curl -L -H "Authorization: token $GITHUB_TOKEN" -o "${name}.zip" "$url"
+            if [ -f "${name}.zip" ]; then
+              unzip -o "${name}.zip" -d "release_artifacts/${name}"
+            fi
+          done <<EOF
+${{ steps.list_artifacts.outputs.result }}
+EOF
+
+      - name: Create GitHub release and upload assets
+        uses: ncipollo/release-action@v1
+        with:
+          tag: "build-${{ github.event.workflow_run.run_number }}"
+          name: "Automated build ${{ github.event.workflow_run.run_number }}"
+          files: release_artifacts/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
