@@ -31,6 +31,9 @@ env/
 build/
 dist/
 
+# Release builds
+!releases/
+
 # IDE
 .vscode/
 .idea/
