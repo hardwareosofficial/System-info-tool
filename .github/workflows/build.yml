@@ -34,10 +34,24 @@ jobs:
       - name: Run Inno Setup on Windows (optional)
         if: runner.os == 'Windows'
         run: |
-          choco install innosetup -y || true
-          if exist SystemInfoTool.iss (
-            ISCC.exe SystemInfoTool.iss || echo "ISCC failed or not found"
-          )
+          # Try to install Inno Setup (may require elevated permissions); don't fail the job if it can't be installed
+          try {
+            choco install innosetup -y -y
+          } catch {
+            Write-Host "choco install innosetup failed or requires elevation; skipping installer install"
+          }
+
+          if (Test-Path "SystemInfoTool.iss") {
+            $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($iscc) {
+              Write-Host "Found ISCC.exe — building installer..."
+              & ISCC.exe SystemInfoTool.iss
+            } else {
+              Write-Host "ISCC.exe not found on runner — skipping installer build"
+            }
+          } else {
+            Write-Host "No SystemInfoTool.iss present — skipping installer step"
+          }
 
       - name: Run threaded smoke test on Windows
         if: runner.os == 'Windows'
