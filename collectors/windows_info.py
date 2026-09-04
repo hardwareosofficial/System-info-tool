@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import platform
 from typing import Any
+import contextlib
+import pythoncom
 
 # Only import Windows-specific libraries if we're actually on Windows
 if platform.system() == "Windows":
@@ -38,6 +40,22 @@ def _get_wmi():
     return wmi.WMI()
 
 
+@contextlib.contextmanager
+def _wmi_connection():
+    """Context manager that initializes COM on the current thread
+    before creating a WMI connection and uninitializes it afterwards.
+    """
+    if not _WMI_AVAILABLE:
+        raise RuntimeError("WMI is only available on Windows with pywin32 and wmi installed")
+    pythoncom.CoInitialize()
+    try:
+        import wmi  # type: ignore
+        conn = wmi.WMI()
+        yield conn
+    finally:
+        pythoncom.CoUninitialize()
+
+
 _ARCH_MAP = {0: "x86", 1: "MIPS", 2: "Alpha", 3: "PowerPC", 5: "ARM", 6: "ia64", 9: "x64", 12: "ARM64"}
 
 
@@ -46,38 +64,38 @@ def get_cpu_detail() -> list[dict[str, Any]]:
         return [{"Error": "WMI not available - this function only works on Windows"}]
     
     try:
-        c = _get_wmi()
-        cpus = []
-        for cpu in c.Win32_Processor():
-            # Determine if 32-bit or 64-bit
-            arch = _ARCH_MAP.get(cpu.Architecture, f"unknown ({cpu.Architecture})")
-            is_64bit = arch in ["x64", "ARM64", "ia64"]
-            
-            # Try to get CPU generation and model info from the name
-            cpu_name = cpu.Name.strip() if cpu.Name else "n/a"
-            generation_info = _extract_cpu_generation(cpu_name)
-            
-            cpus.append({
-                "Name": cpu_name,
-                "Manufacturer": cpu.Manufacturer,
-                "Cores": cpu.NumberOfCores,
-                "Logical Processors": cpu.NumberOfLogicalProcessors,
-                "Max Clock Speed (MHz)": cpu.MaxClockSpeed,
-                "Current Clock Speed (MHz)": cpu.CurrentClockSpeed,
-                "L2 Cache (KB)": cpu.L2CacheSize,
-                "L3 Cache (KB)": cpu.L3CacheSize,
-                "L1 Cache (KB)": cpu.L1CacheSize if hasattr(cpu, 'L1CacheSize') else "n/a",
-                "Socket": cpu.SocketDesignation,
-                "Architecture": arch,
-                "CPU Mode": "64-bit" if is_64bit else "32-bit",
-                "Address Width": f"{cpu.AddressWidth}-bit" if cpu.AddressWidth else "n/a",
-                "Data Width": f"{cpu.DataWidth}-bit" if cpu.DataWidth else "n/a",
-                "Voltage (V)": cpu.CurrentVoltage / 10 if cpu.CurrentVoltage else "n/a",
-                "Generation/Family": generation_info,
-                "Stepping": cpu.Stepping if hasattr(cpu, 'Stepping') else "n/a",
-                "Status": cpu.Status,
-                "CPU ID": cpu.ProcessorId if hasattr(cpu, 'ProcessorId') else "n/a",
-            })
+        with _wmi_connection() as c:
+            cpus = []
+            for cpu in c.Win32_Processor():
+                # Determine if 32-bit or 64-bit
+                arch = _ARCH_MAP.get(cpu.Architecture, f"unknown ({cpu.Architecture})")
+                is_64bit = arch in ["x64", "ARM64", "ia64"]
+
+                # Try to get CPU generation and model info from the name
+                cpu_name = cpu.Name.strip() if cpu.Name else "n/a"
+                generation_info = _extract_cpu_generation(cpu_name)
+
+                cpus.append({
+                    "Name": cpu_name,
+                    "Manufacturer": cpu.Manufacturer,
+                    "Cores": cpu.NumberOfCores,
+                    "Logical Processors": cpu.NumberOfLogicalProcessors,
+                    "Max Clock Speed (MHz)": cpu.MaxClockSpeed,
+                    "Current Clock Speed (MHz)": cpu.CurrentClockSpeed,
+                    "L2 Cache (KB)": cpu.L2CacheSize,
+                    "L3 Cache (KB)": cpu.L3CacheSize,
+                    "L1 Cache (KB)": cpu.L1CacheSize if hasattr(cpu, 'L1CacheSize') else "n/a",
+                    "Socket": cpu.SocketDesignation,
+                    "Architecture": arch,
+                    "CPU Mode": "64-bit" if is_64bit else "32-bit",
+                    "Address Width": f"{cpu.AddressWidth}-bit" if cpu.AddressWidth else "n/a",
+                    "Data Width": f"{cpu.DataWidth}-bit" if cpu.DataWidth else "n/a",
+                    "Voltage (V)": cpu.CurrentVoltage / 10 if cpu.CurrentVoltage else "n/a",
+                    "Generation/Family": generation_info,
+                    "Stepping": cpu.Stepping if hasattr(cpu, 'Stepping') else "n/a",
+                    "Status": cpu.Status,
+                    "CPU ID": cpu.ProcessorId if hasattr(cpu, 'ProcessorId') else "n/a",
+                })
         return cpus
     except Exception as e:
         return [{"Error": f"Failed to get CPU detail: {str(e)}"}]
@@ -148,40 +166,40 @@ def get_gpu_detail() -> list[dict[str, Any]]:
         return [{"Error": "WMI not available - this function only works on Windows"}]
     
     try:
-        c = _get_wmi()
-        gpus = []
-        gpu_index = 0
-        for gpu in c.Win32_VideoController():
-            gpu_index += 1
-            vram = None
-            try:
-                # AdapterRAM is a 32-bit field and overflows/wraps for GPUs
-                # with >4GB VRAM on many driver versions — flag that.
-                if gpu.AdapterRAM:
-                    vram_gb = round(int(gpu.AdapterRAM) / (1024 ** 3), 2)
-                    vram = f"{vram_gb} GB (may be inaccurate above 4GB, WMI limitation)"
-            except Exception:
-                vram = "n/a"
-            
-            # Determine GPU type
-            gpu_name = gpu.Name.lower() if gpu.Name else ""
-            gpu_type = _determine_gpu_type(gpu_name)
-            
-            gpus.append({
-                "GPU #": gpu_index,
-                "Name": gpu.Name,
-                "GPU Type": gpu_type,
-                "Driver Version": gpu.DriverVersion,
-                "Driver Date": gpu.DriverDate,
-                "VRAM (reported)": vram or "n/a",
-                "Current Resolution": f"{gpu.CurrentHorizontalResolution}x{gpu.CurrentVerticalResolution}"
-                if gpu.CurrentHorizontalResolution else "n/a",
-                "Max Resolution": f"{gpu.MaxRefreshRate} Hz" if gpu.MaxRefreshRate else "n/a",
-                "Status": gpu.Status,
-                "PNP Device ID": gpu.PNPDeviceID,
-                "Installed Display Drivers": gpu.InstalledDisplayDrivers if hasattr(gpu, 'InstalledDisplayDrivers') else "n/a",
-                "Driver Model": gpu.DriverModel if hasattr(gpu, 'DriverModel') else "n/a",
-            })
+        with _wmi_connection() as c:
+            gpus = []
+            gpu_index = 0
+            for gpu in c.Win32_VideoController():
+                gpu_index += 1
+                vram = None
+                try:
+                    # AdapterRAM is a 32-bit field and overflows/wraps for GPUs
+                    # with >4GB VRAM on many driver versions — flag that.
+                    if gpu.AdapterRAM:
+                        vram_gb = round(int(gpu.AdapterRAM) / (1024 ** 3), 2)
+                        vram = f"{vram_gb} GB (may be inaccurate above 4GB, WMI limitation)"
+                except Exception:
+                    vram = "n/a"
+
+                # Determine GPU type
+                gpu_name = gpu.Name.lower() if gpu.Name else ""
+                gpu_type = _determine_gpu_type(gpu_name)
+
+                gpus.append({
+                    "GPU #": gpu_index,
+                    "Name": gpu.Name,
+                    "GPU Type": gpu_type,
+                    "Driver Version": gpu.DriverVersion,
+                    "Driver Date": gpu.DriverDate,
+                    "VRAM (reported)": vram or "n/a",
+                    "Current Resolution": f"{gpu.CurrentHorizontalResolution}x{gpu.CurrentVerticalResolution}"
+                    if gpu.CurrentHorizontalResolution else "n/a",
+                    "Max Resolution": f"{gpu.MaxRefreshRate} Hz" if gpu.MaxRefreshRate else "n/a",
+                    "Status": gpu.Status,
+                    "PNP Device ID": gpu.PNPDeviceID,
+                    "Installed Display Drivers": gpu.InstalledDisplayDrivers if hasattr(gpu, 'InstalledDisplayDrivers') else "n/a",
+                    "Driver Model": gpu.DriverModel if hasattr(gpu, 'DriverModel') else "n/a",
+                })
         return gpus
     except Exception as e:
         return [{"Error": f"Failed to get GPU detail: {str(e)}"}]
@@ -224,10 +242,10 @@ def get_motherboard_detail() -> dict[str, Any]:
         return {"Error": "WMI not available - this function only works on Windows"}
     
     try:
-        c = _get_wmi()
-        result: dict[str, Any] = {}
+        with _wmi_connection() as c:
+            result: dict[str, Any] = {}
 
-        boards = c.Win32_BaseBoard()
+            boards = c.Win32_BaseBoard()
         if boards:
             b = boards[0]
             result.update({
@@ -273,32 +291,32 @@ def get_chipset_detail() -> dict[str, Any]:
         return {"Error": "WMI not available - this function only works on Windows"}
     
     try:
-        c = _get_wmi()
-        result = {}
-        
-        # Try to find PCH/Southbridge
-        for dev in c.Win32_PnPEntity():
-            try:
-                if dev.PNPClass == "System" and dev.Name and (
-                    "LPC" in dev.Name or "ISA Bridge" in dev.Name or "PCH" in dev.Name
-                ):
-                    result["Southbridge/PCH"] = dev.Name
-                    result["PCH Device ID"] = dev.DeviceID
-                    break
-            except Exception:
-                continue
-        
-        # Try to find Northbridge (though less common in modern systems)
-        for dev in c.Win32_PnPEntity():
-            try:
-                if dev.PNPClass == "System" and dev.Name and (
-                    "Northbridge" in dev.Name or "Memory Controller" in dev.Name or "Host Bridge" in dev.Name
-                ):
-                    result["Northbridge"] = dev.Name
-                    result["Northbridge Device ID"] = dev.DeviceID
-                    break
-            except Exception:
-                continue
+        with _wmi_connection() as c:
+            result = {}
+            
+            # Try to find PCH/Southbridge
+            for dev in c.Win32_PnPEntity():
+                try:
+                    if dev.PNPClass == "System" and dev.Name and (
+                        "LPC" in dev.Name or "ISA Bridge" in dev.Name or "PCH" in dev.Name
+                    ):
+                        result["Southbridge/PCH"] = dev.Name
+                        result["PCH Device ID"] = dev.DeviceID
+                        break
+                except Exception:
+                    continue
+
+            # Try to find Northbridge (though less common in modern systems)
+            for dev in c.Win32_PnPEntity():
+                try:
+                    if dev.PNPClass == "System" and dev.Name and (
+                        "Northbridge" in dev.Name or "Memory Controller" in dev.Name or "Host Bridge" in dev.Name
+                    ):
+                        result["Northbridge"] = dev.Name
+                        result["Northbridge Device ID"] = dev.DeviceID
+                        break
+                except Exception:
+                    continue
         
         # Try to get chipset manufacturer from motherboard info
         try:
@@ -321,28 +339,28 @@ def get_storage_detail() -> list[dict[str, Any]]:
         return [{"Error": "WMI not available - this function only works on Windows"}]
     
     try:
-        c = _get_wmi()
-        disks = []
-        for disk in c.Win32_DiskDrive():
-            # Determine storage type
-            storage_type = _determine_storage_type(disk)
-            
-            disks.append({
-                "Model": disk.Model,
-                "Interface Type": disk.InterfaceType,
-                "Size (GB)": round(int(disk.Size) / (1024 ** 3), 2) if disk.Size else "n/a",
-                "Media Type": disk.MediaType,
-                "Storage Type": storage_type,
-                "Serial Number": (disk.SerialNumber or "n/a").strip(),
-                "Partitions": disk.Partitions,
-                "Status": disk.Status,
-                "Firmware Revision": disk.FirmwareRevision if hasattr(disk, 'FirmwareRevision') else "n/a",
-                "Bytes per Sector": disk.BytesPerSector if hasattr(disk, 'BytesPerSector') else "n/a",
-                "Sectors per Track": disk.SectorsPerTrack if hasattr(disk, 'SectorsPerTrack') else "n/a",
-                "Tracks per Cylinder": disk.TracksPerCylinder if hasattr(disk, 'TracksPerCylinder') else "n/a",
-                "Cylinders": disk.TotalCylinders if hasattr(disk, 'TotalCylinders') else "n/a",
-                "Media Type Desc": _get_media_type_description(disk.MediaType),
-            })
+        with _wmi_connection() as c:
+            disks = []
+            for disk in c.Win32_DiskDrive():
+                # Determine storage type
+                storage_type = _determine_storage_type(disk)
+
+                disks.append({
+                    "Model": disk.Model,
+                    "Interface Type": disk.InterfaceType,
+                    "Size (GB)": round(int(disk.Size) / (1024 ** 3), 2) if disk.Size else "n/a",
+                    "Media Type": disk.MediaType,
+                    "Storage Type": storage_type,
+                    "Serial Number": (disk.SerialNumber or "n/a").strip(),
+                    "Partitions": disk.Partitions,
+                    "Status": disk.Status,
+                    "Firmware Revision": disk.FirmwareRevision if hasattr(disk, 'FirmwareRevision') else "n/a",
+                    "Bytes per Sector": disk.BytesPerSector if hasattr(disk, 'BytesPerSector') else "n/a",
+                    "Sectors per Track": disk.SectorsPerTrack if hasattr(disk, 'SectorsPerTrack') else "n/a",
+                    "Tracks per Cylinder": disk.TracksPerCylinder if hasattr(disk, 'TracksPerCylinder') else "n/a",
+                    "Cylinders": disk.TotalCylinders if hasattr(disk, 'TotalCylinders') else "n/a",
+                    "Media Type Desc": _get_media_type_description(disk.MediaType),
+                })
         return disks
     except Exception as e:
         return [{"Error": f"Failed to get storage detail: {str(e)}"}]
@@ -413,23 +431,23 @@ def get_drivers_detail(limit: int = 50) -> list[dict[str, Any]]:
         return [{"Error": "WMI not available - this function only works on Windows"}]
     
     try:
-        c = _get_wmi()
-        drivers = []
-        for drv in c.Win32_PnPSignedDriver():
-            driver_info = {
-                "Device Name": drv.DeviceName,
-                "Driver Version": drv.DriverVersion,
-                "Manufacturer": drv.Manufacturer,
-                "Driver Date": drv.DriverDate,
-                "Is Signed": drv.IsSigned,
-                "Class": drv.DeviceClass,
-                "Driver Provider": drv.DriverProviderName if hasattr(drv, 'DriverProviderName') else "n/a",
-                "Inf Name": drv.InfName if hasattr(drv, 'InfName') else "n/a",
-                "Device ID": drv.DeviceID if hasattr(drv, 'DeviceID') else "n/a",
-            }
-            drivers.append(driver_info)
-            if len(drivers) >= limit:
-                break
+        with _wmi_connection() as c:
+            drivers = []
+            for drv in c.Win32_PnPSignedDriver():
+                driver_info = {
+                    "Device Name": drv.DeviceName,
+                    "Driver Version": drv.DriverVersion,
+                    "Manufacturer": drv.Manufacturer,
+                    "Driver Date": drv.DriverDate,
+                    "Is Signed": drv.IsSigned,
+                    "Class": drv.DeviceClass,
+                    "Driver Provider": drv.DriverProviderName if hasattr(drv, 'DriverProviderName') else "n/a",
+                    "Inf Name": drv.InfName if hasattr(drv, 'InfName') else "n/a",
+                    "Device ID": drv.DeviceID if hasattr(drv, 'DeviceID') else "n/a",
+                }
+                drivers.append(driver_info)
+                if len(drivers) >= limit:
+                    break
         return drivers
     except Exception as e:
         return [{"Error": f"Failed to get drivers detail: {str(e)}"}]
@@ -441,14 +459,14 @@ def get_ram_module_detail() -> list[dict[str, Any]]:
         return [{"Error": "WMI not available - this function only works on Windows"}]
     
     try:
-        c = _get_wmi()
-        sticks = []
-        total_slots = 0
-        populated_slots = 0
-        
-        # Get all physical memory
-        memory_devices = list(c.Win32_PhysicalMemory())
-        populated_slots = len(memory_devices)
+        with _wmi_connection() as c:
+            sticks = []
+            total_slots = 0
+            populated_slots = 0
+            
+            # Get all physical memory
+            memory_devices = list(c.Win32_PhysicalMemory())
+            populated_slots = len(memory_devices)
         
         # Try to get total number of memory slots
         try:
@@ -542,8 +560,8 @@ def get_windows_edition_detail() -> dict[str, Any]:
         return {"Error": "WMI not available - this function only works on Windows"}
     
     try:
-        c = _get_wmi()
-        os_list = c.Win32_OperatingSystem()
+        with _wmi_connection() as c:
+            os_list = c.Win32_OperatingSystem()
         if not os_list:
             return {}
         o = os_list[0]
@@ -566,10 +584,10 @@ def get_bios_detailed_info() -> dict[str, Any]:
         return {"Error": "WMI not available - this function only works on Windows"}
     
     try:
-        c = _get_wmi()
-        result = {}
-        
-        bios_list = c.Win32_BIOS()
+        with _wmi_connection() as c:
+            result = {}
+            
+            bios_list = c.Win32_BIOS()
         if bios_list:
             bios = bios_list[0]
             result.update({
@@ -636,19 +654,19 @@ def get_edid_info() -> dict[str, Any]:
         return {"Error": "WMI not available - this function only works on Windows"}
     
     try:
-        c = _get_wmi()
-        monitors = []
-        
-        for monitor in c.Win32_DesktopMonitor():
-            if monitor.Name and monitor.Name != "Default Monitor":
-                monitor_info = {
-                    "Monitor Name": monitor.Name,
-                    "Monitor Type": monitor.MonitorType if hasattr(monitor, 'MonitorType') else "n/a",
-                    "Screen Height": monitor.ScreenHeight if hasattr(monitor, 'ScreenHeight') else "n/a",
-                    "Screen Width": monitor.ScreenWidth if hasattr(monitor, 'ScreenWidth') else "n/a",
-                    "PNP Device ID": monitor.PNPDeviceID if hasattr(monitor, 'PNPDeviceID') else "n/a",
-                }
-                monitors.append(monitor_info)
+        with _wmi_connection() as c:
+            monitors = []
+            
+            for monitor in c.Win32_DesktopMonitor():
+                if monitor.Name and monitor.Name != "Default Monitor":
+                    monitor_info = {
+                        "Monitor Name": monitor.Name,
+                        "Monitor Type": monitor.MonitorType if hasattr(monitor, 'MonitorType') else "n/a",
+                        "Screen Height": monitor.ScreenHeight if hasattr(monitor, 'ScreenHeight') else "n/a",
+                        "Screen Width": monitor.ScreenWidth if hasattr(monitor, 'ScreenWidth') else "n/a",
+                        "PNP Device ID": monitor.PNPDeviceID if hasattr(monitor, 'PNPDeviceID') else "n/a",
+                    }
+                    monitors.append(monitor_info)
         
         if not monitors:
             return {"Note": "No detailed EDID information available via WMI"}
@@ -664,21 +682,21 @@ def get_battery_detailed_info() -> dict[str, Any]:
         return {"Error": "WMI not available - this function only works on Windows"}
     
     try:
-        c = _get_wmi()
-        result = {}
-        
-        battery = c.Win32_Battery()
-        if battery:
-            bat = battery[0]
-            result.update({
-                "Battery Name": bat.Name if hasattr(bat, 'Name') else "n/a",
-                "Battery Status": bat.BatteryStatus if hasattr(bat, 'BatteryStatus') else "n/a",
-                "Estimated Charge Remaining (%)": bat.EstimatedChargeRemaining if hasattr(bat, 'EstimatedChargeRemaining') else "n/a",
-                "Design Capacity": bat.DesignCapacity if hasattr(bat, 'DesignCapacity') else "n/a",
-                "Full Charge Capacity": bat.FullChargeCapacity if hasattr(bat, 'FullChargeCapacity') else "n/a",
-                "Chemistry": bat.Chemistry if hasattr(bat, 'Chemistry') else "n/a",
-                "Manufacture Date": bat.ManufactureDate if hasattr(bat, 'ManufactureDate') else "n/a",
-            })
+        with _wmi_connection() as c:
+            result = {}
+            
+            battery = c.Win32_Battery()
+            if battery:
+                bat = battery[0]
+                result.update({
+                    "Battery Name": bat.Name if hasattr(bat, 'Name') else "n/a",
+                    "Battery Status": bat.BatteryStatus if hasattr(bat, 'BatteryStatus') else "n/a",
+                    "Estimated Charge Remaining (%)": bat.EstimatedChargeRemaining if hasattr(bat, 'EstimatedChargeRemaining') else "n/a",
+                    "Design Capacity": bat.DesignCapacity if hasattr(bat, 'DesignCapacity') else "n/a",
+                    "Full Charge Capacity": bat.FullChargeCapacity if hasattr(bat, 'FullChargeCapacity') else "n/a",
+                    "Chemistry": bat.Chemistry if hasattr(bat, 'Chemistry') else "n/a",
+                    "Manufacture Date": bat.ManufactureDate if hasattr(bat, 'ManufactureDate') else "n/a",
+                })
             
             # Calculate wear level if we have both capacities
             if hasattr(bat, 'DesignCapacity') and hasattr(bat, 'FullChargeCapacity') and bat.DesignCapacity and bat.FullChargeCapacity:
@@ -706,11 +724,11 @@ def get_acpi_tables_info() -> dict[str, Any]:
         return {"Error": "WMI not available - this function only works on Windows"}
     
     try:
-        c = _get_wmi()
-        result = {}
-        
-        # Try to get system enclosure information (part of ACPI/SMBIOS)
-        enclosure = c.Win32_SystemEnclosure()
+        with _wmi_connection() as c:
+            result = {}
+            
+            # Try to get system enclosure information (part of ACPI/SMBIOS)
+            enclosure = c.Win32_SystemEnclosure()
         if enclosure:
             enc = enclosure[0]
             result.update({
@@ -735,11 +753,11 @@ def get_smbios_detailed_info() -> dict[str, Any]:
         return {"Error": "WMI not available - this function only works on Windows"}
     
     try:
-        c = _get_wmi()
-        result = {}
-        
-        # Get computer system information
-        computer = c.Win32_ComputerSystem()
+        with _wmi_connection() as c:
+            result = {}
+            
+            # Get computer system information
+            computer = c.Win32_ComputerSystem()
         if computer:
             comp = computer[0]
             result.update({
@@ -785,8 +803,8 @@ def get_pci_usb_bus_info() -> dict[str, Any]:
         return {"Error": "WMI not available - this function only works on Windows"}
     
     try:
-        c = _get_wmi()
-        result = {"PCI Devices": [], "USB Controllers": []}
+        with _wmi_connection() as c:
+            result = {"PCI Devices": [], "USB Controllers": []}
         
         # Get PCI devices (limited to prevent performance issues)
         pci_count = 0
