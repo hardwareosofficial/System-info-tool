@@ -31,12 +31,6 @@ env/
 build/
 dist/
 
-# But allow releases directory for distribution builds
-!releases/
-
-# Release builds
-releases/
-
 # IDE
 .vscode/
 .idea/
