@@ -21,6 +21,7 @@ import platform
 from typing import Any
 import contextlib
 import pythoncom
+import gc
 
 # Only import Windows-specific libraries if we're actually on Windows
 if platform.system() == "Windows":
@@ -51,7 +52,15 @@ def _wmi_connection():
     try:
         import wmi  # type: ignore
         conn = wmi.WMI()
-        yield conn
+        try:
+            yield conn
+        finally:
+            # Encourage immediate cleanup of COM proxies before uninitializing
+            try:
+                del conn
+            except Exception:
+                pass
+            gc.collect()
     finally:
         pythoncom.CoUninitialize()
 
@@ -246,35 +255,49 @@ def get_motherboard_detail() -> dict[str, Any]:
             result: dict[str, Any] = {}
 
             boards = c.Win32_BaseBoard()
-        if boards:
-            b = boards[0]
-            result.update({
-                "Board Manufacturer": b.Manufacturer,
-                "Board Product": b.Product,
-                "Board Version": b.Version,
-                "Board Serial": b.SerialNumber,
-            })
+            if boards:
+                b = boards[0]
+                result.update({
+                    "Board Manufacturer": b.Manufacturer,
+                    "Board Product": b.Product,
+                    "Board Version": b.Version,
+                    "Board Serial": b.SerialNumber,
+                })
 
-        bios_list = c.Win32_BIOS()
-        if bios_list:
-            bios = bios_list[0]
-            result.update({
-                "BIOS Manufacturer": bios.Manufacturer,
-                "BIOS Version": ", ".join(bios.BIOSVersion) if bios.BIOSVersion else bios.SMBIOSBIOSVersion,
-                "BIOS Release Date": bios.ReleaseDate,
-                "BIOS Serial": bios.SerialNumber,
-            })
+            bios_list = c.Win32_BIOS()
+            if bios_list:
+                bios = bios_list[0]
+                result.update({
+                    "BIOS Manufacturer": bios.Manufacturer,
+                    "BIOS Version": ", ".join(bios.BIOSVersion) if bios.BIOSVersion else bios.SMBIOSBIOSVersion,
+                    "BIOS Release Date": bios.ReleaseDate,
+                    "BIOS Serial": bios.SerialNumber,
+                })
 
-        systems = c.Win32_ComputerSystem()
-        if systems:
-            s = systems[0]
-            result.update({
-                "System Manufacturer": s.Manufacturer,
-                "System Model": s.Model,
-                "System Family": s.SystemFamily,
-            })
+            systems = c.Win32_ComputerSystem()
+            if systems:
+                s = systems[0]
+                result.update({
+                    "System Manufacturer": s.Manufacturer,
+                    "System Model": s.Model,
+                    "System Family": s.SystemFamily,
+                })
 
-        return result
+            # Clear COM object references before leaving the COM-initialized block
+            try:
+                del boards
+            except Exception:
+                pass
+            try:
+                del bios_list
+            except Exception:
+                pass
+            try:
+                del systems
+            except Exception:
+                pass
+
+            return result
     except Exception as e:
         return {"Error": f"Failed to get motherboard detail: {str(e)}"}
 
@@ -293,7 +316,7 @@ def get_chipset_detail() -> dict[str, Any]:
     try:
         with _wmi_connection() as c:
             result = {}
-            
+
             # Try to find PCH/Southbridge
             for dev in c.Win32_PnPEntity():
                 try:
@@ -317,19 +340,19 @@ def get_chipset_detail() -> dict[str, Any]:
                         break
                 except Exception:
                     continue
-        
-        # Try to get chipset manufacturer from motherboard info
-        try:
-            boards = c.Win32_BaseBoard()
-            if boards:
-                result["Chipset Manufacturer"] = boards[0].Manufacturer
-        except Exception:
-            pass
-        
-        if not result:
-            return {"Chipset": "Not identifiable via WMI PnP enumeration on this system"}
-        
-        return result
+
+            # Try to get chipset manufacturer from motherboard info
+            try:
+                boards = c.Win32_BaseBoard()
+                if boards:
+                    result["Chipset Manufacturer"] = boards[0].Manufacturer
+            except Exception:
+                pass
+
+            if not result:
+                return {"Chipset": "Not identifiable via WMI PnP enumeration on this system"}
+
+            return result
     except Exception as e:
         return {"Error": f"Failed to get chipset detail: {str(e)}"}
 
@@ -463,54 +486,60 @@ def get_ram_module_detail() -> list[dict[str, Any]]:
             sticks = []
             total_slots = 0
             populated_slots = 0
-            
+
             # Get all physical memory
             memory_devices = list(c.Win32_PhysicalMemory())
             populated_slots = len(memory_devices)
-        
-        # Try to get total number of memory slots
-        try:
-            memory_arrays = c.Win32_PhysicalMemoryArray()
-            if memory_arrays:
-                for mem_array in memory_arrays:
-                    if hasattr(mem_array, 'MemoryDevices') and mem_array.MemoryDevices:
-                        total_slots = mem_array.MemoryDevices
-                        break
-        except Exception:
-            total_slots = populated_slots  # Fallback to count of populated slots
-        
-        for mem in memory_devices:
-            # Determine memory type
-            mem_type = _get_memory_type_name(mem.SMBIOSMemoryType)
-            
-            stick_info = {
-                "Slot": mem.DeviceLocator,
-                "Bank Label": mem.BankLabel if hasattr(mem, 'BankLabel') else "n/a",
-                "Capacity (GB)": round(int(mem.Capacity) / (1024 ** 3), 2) if mem.Capacity else "n/a",
-                "Speed (MHz)": mem.Speed,
-                "Manufacturer": mem.Manufacturer,
-                "Part Number": (mem.PartNumber or "n/a").strip(),
-                "Memory Type": mem_type,
-                "Serial Number": mem.SerialNumber if hasattr(mem, 'SerialNumber') else "n/a",
-                "Configured Clock Speed": mem.ConfiguredClockSpeed if hasattr(mem, 'ConfiguredClockSpeed') else "n/a",
-                "Slot Population": f"{len(sticks) + 1} of {total_slots}" if total_slots > 0 else "n/a",
-            }
-            sticks.append(stick_info)
-        
-        # Add summary as a separate item
-        if total_slots > 0:
-            summary = {
-                "Summary": {
-                    "Total Slots": total_slots,
-                    "Populated Slots": populated_slots,
-                    "Empty Slots": total_slots - populated_slots,
-                    "Slot Population": f"{populated_slots} of {total_slots}",
-                    "Total Capacity (GB)": sum(s.get("Capacity (GB)", 0) for s in sticks if isinstance(s.get("Capacity (GB)"), (int, float)))
+
+            # Try to get total number of memory slots
+            try:
+                memory_arrays = c.Win32_PhysicalMemoryArray()
+                if memory_arrays:
+                    for mem_array in memory_arrays:
+                        if hasattr(mem_array, 'MemoryDevices') and mem_array.MemoryDevices:
+                            total_slots = mem_array.MemoryDevices
+                            break
+            except Exception:
+                total_slots = populated_slots  # Fallback to count of populated slots
+
+            for mem in memory_devices:
+                # Determine memory type
+                mem_type = _get_memory_type_name(mem.SMBIOSMemoryType)
+
+                stick_info = {
+                    "Slot": mem.DeviceLocator,
+                    "Bank Label": mem.BankLabel if hasattr(mem, 'BankLabel') else "n/a",
+                    "Capacity (GB)": round(int(mem.Capacity) / (1024 ** 3), 2) if mem.Capacity else "n/a",
+                    "Speed (MHz)": mem.Speed,
+                    "Manufacturer": mem.Manufacturer,
+                    "Part Number": (mem.PartNumber or "n/a").strip(),
+                    "Memory Type": mem_type,
+                    "Serial Number": mem.SerialNumber if hasattr(mem, 'SerialNumber') else "n/a",
+                    "Configured Clock Speed": mem.ConfiguredClockSpeed if hasattr(mem, 'ConfiguredClockSpeed') else "n/a",
+                    "Slot Population": f"{len(sticks) + 1} of {total_slots}" if total_slots > 0 else "n/a",
                 }
-            }
-            sticks.append(summary)
-        
-        return sticks
+                sticks.append(stick_info)
+
+            # Add summary as a separate item
+            if total_slots > 0:
+                summary = {
+                    "Summary": {
+                        "Total Slots": total_slots,
+                        "Populated Slots": populated_slots,
+                        "Empty Slots": total_slots - populated_slots,
+                        "Slot Population": f"{populated_slots} of {total_slots}",
+                        "Total Capacity (GB)": sum(s.get("Capacity (GB)", 0) for s in sticks if isinstance(s.get("Capacity (GB)"), (int, float)))
+                    }
+                }
+                sticks.append(summary)
+
+            # Clear COM refs
+            try:
+                del memory_devices
+            except Exception:
+                pass
+
+            return sticks
     except Exception as e:
         return [{"Error": f"Failed to get RAM module detail: {str(e)}"}]
 
@@ -586,30 +615,40 @@ def get_bios_detailed_info() -> dict[str, Any]:
     try:
         with _wmi_connection() as c:
             result = {}
-            
+
             bios_list = c.Win32_BIOS()
-        if bios_list:
-            bios = bios_list[0]
-            result.update({
-                "BIOS Manufacturer": bios.Manufacturer,
-                "BIOS Version": ", ".join(bios.BIOSVersion) if bios.BIOSVersion else bios.SMBIOSBIOSVersion,
-                "BIOS Release Date": bios.ReleaseDate,
-                "BIOS Serial": bios.SerialNumber,
-                "SMBIOS Version": bios.SMBIOSMajorVersion if hasattr(bios, 'SMBIOSMajorVersion') else "n/a",
-                "SMBIOS Minor Version": bios.SMBIOSMinorVersion if hasattr(bios, 'SMBIOSMinorVersion') else "n/a",
-                "BIOS Age": _calculate_bios_age(bios.ReleaseDate) if bios.ReleaseDate else "n/a",
-            })
-        
-        # Get BIOS characteristics
-        try:
-            for bios in c.Win32_BIOS():
-                if hasattr(bios, 'BIOSCharacteristics') and bios.BIOSCharacteristics:
-                    result["BIOS Characteristics"] = bios.BIOSCharacteristics
-                break
-        except Exception:
-            pass
-        
-        return result
+            if bios_list:
+                bios = bios_list[0]
+                result.update({
+                    "BIOS Manufacturer": bios.Manufacturer,
+                    "BIOS Version": ", ".join(bios.BIOSVersion) if bios.BIOSVersion else bios.SMBIOSBIOSVersion,
+                    "BIOS Release Date": bios.ReleaseDate,
+                    "BIOS Serial": bios.SerialNumber,
+                    "SMBIOS Version": bios.SMBIOSMajorVersion if hasattr(bios, 'SMBIOSMajorVersion') else "n/a",
+                    "SMBIOS Minor Version": bios.SMBIOSMinorVersion if hasattr(bios, 'SMBIOSMinorVersion') else "n/a",
+                    "BIOS Age": _calculate_bios_age(bios.ReleaseDate) if bios.ReleaseDate else "n/a",
+                })
+
+            # Get BIOS characteristics
+            try:
+                for bios in c.Win32_BIOS():
+                    if hasattr(bios, 'BIOSCharacteristics') and bios.BIOSCharacteristics:
+                        result["BIOS Characteristics"] = bios.BIOSCharacteristics
+                    break
+            except Exception:
+                pass
+
+            # Clear COM refs
+            try:
+                del bios_list
+            except Exception:
+                pass
+            try:
+                del bios
+            except Exception:
+                pass
+
+            return result
     except Exception as e:
         return {"Error": f"Failed to get BIOS detail: {str(e)}"}
 
@@ -709,6 +748,30 @@ def get_battery_detailed_info() -> dict[str, Any]:
                         result["Health"] = f"{100 - wear_level:.1f}%"
                 except Exception:
                     pass
+
+            # Estimated runtime and approximate power draw (best-effort)
+            try:
+                # EstimatedRunTime is minutes remaining as per WMI spec (may be 0xFFFFFFFF if unknown)
+                if hasattr(bat, 'EstimatedRunTime') and bat.EstimatedRunTime and int(bat.EstimatedRunTime) != 0xFFFFFFFF:
+                    ert_min = int(bat.EstimatedRunTime)
+                    result["Estimated Run Time (min)"] = ert_min
+                else:
+                    ert_min = None
+
+                # Try to estimate power (Watts) using FullChargeCapacity (mWh) and EstimatedRunTime
+                if ert_min and hasattr(bat, 'FullChargeCapacity') and bat.FullChargeCapacity:
+                    try:
+                        full_mwh = int(bat.FullChargeCapacity)
+                        # power (mW) = mWh / hours => mWh / (ert_min/60)
+                        hours = ert_min / 60.0 if ert_min else None
+                        if hours and hours > 0:
+                            power_mw = full_mwh / hours
+                            power_w = power_mw / 1000.0
+                            result["Estimated Power Draw (W)"] = f"{power_w:.2f} W (approx)"
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         
         if not result:
             return {"Note": "No battery detected or no detailed battery information available"}
@@ -755,44 +818,62 @@ def get_smbios_detailed_info() -> dict[str, Any]:
     try:
         with _wmi_connection() as c:
             result = {}
-            
+
             # Get computer system information
             computer = c.Win32_ComputerSystem()
-        if computer:
-            comp = computer[0]
-            result.update({
-                "System Manufacturer": comp.Manufacturer,
-                "System Model": comp.Model,
-                "System Type": comp.SystemType if hasattr(comp, 'SystemType') else "n/a",
-                "System Family": comp.SystemFamily if hasattr(comp, 'SystemFamily') else "n/a",
-                "Number of Processors": comp.NumberOfProcessors if hasattr(comp, 'NumberOfProcessors') else "n/a",
-            })
-        
-        # Get base board information
-        baseboard = c.Win32_BaseBoard()
-        if baseboard:
-            board = baseboard[0]
-            result.update({
-                "Board Manufacturer": board.Manufacturer,
-                "Board Product": board.Product,
-                "Board Version": board.Version,
-                "Board Serial": board.SerialNumber,
-            })
-        
-        # Get BIOS information
-        bios = c.Win32_BIOS()
-        if bios:
-            b = bios[0]
-            result.update({
-                "BIOS Version": b.SMBIOSBIOSVersion,
-                "BIOS Release Date": b.ReleaseDate,
-                "SMBIOS Version": f"{b.SMBIOSMajorVersion}.{b.SMBIOSMinorVersion}" if hasattr(b, 'SMBIOSMajorVersion') else "n/a",
-            })
-        
-        if not result:
-            return {"Note": "No SMBIOS information available"}
-        
-        return result
+            if computer:
+                comp = computer[0]
+                result.update({
+                    "System Manufacturer": comp.Manufacturer,
+                    "System Model": comp.Model,
+                    "System Type": comp.SystemType if hasattr(comp, 'SystemType') else "n/a",
+                    "System Family": comp.SystemFamily if hasattr(comp, 'SystemFamily') else "n/a",
+                    "Number of Processors": comp.NumberOfProcessors if hasattr(comp, 'NumberOfProcessors') else "n/a",
+                })
+
+            # Get base board information
+            baseboard = c.Win32_BaseBoard()
+            if baseboard:
+                board = baseboard[0]
+                result.update({
+                    "Board Manufacturer": board.Manufacturer,
+                    "Board Product": board.Product,
+                    "Board Version": board.Version,
+                    "Board Serial": board.SerialNumber,
+                })
+
+            # Get BIOS information
+            bios = c.Win32_BIOS()
+            if bios:
+                b = bios[0]
+                result.update({
+                    "BIOS Version": b.SMBIOSBIOSVersion,
+                    "BIOS Release Date": b.ReleaseDate,
+                    "SMBIOS Version": f"{b.SMBIOSMajorVersion}.{b.SMBIOSMinorVersion}" if hasattr(b, 'SMBIOSMajorVersion') else "n/a",
+                })
+
+            if not result:
+                return {"Note": "No SMBIOS information available"}
+
+            # Clear COM refs before uninitializing
+            try:
+                del computer
+            except Exception:
+                pass
+            try:
+                del baseboard
+            except Exception:
+                pass
+            try:
+                del bios
+            except Exception:
+                pass
+            try:
+                del b
+            except Exception:
+                pass
+
+            return result
     except Exception as e:
         return {"Error": f"Could not retrieve SMBIOS info: {str(e)}"}
 
@@ -805,46 +886,46 @@ def get_pci_usb_bus_info() -> dict[str, Any]:
     try:
         with _wmi_connection() as c:
             result = {"PCI Devices": [], "USB Controllers": []}
-        
-        # Get PCI devices (limited to prevent performance issues)
-        pci_count = 0
-        for dev in c.Win32_PnPEntity():
-            try:
-                if dev.PNPClass and "PCI" in dev.PNPClass.upper():
-                    pci_info = {
-                        "Name": dev.Name,
-                        "Device ID": dev.DeviceID,
-                        "Manufacturer": dev.Manufacturer if hasattr(dev, 'Manufacturer') else "n/a",
-                        "Status": dev.Status if hasattr(dev, 'Status') else "n/a",
-                    }
-                    result["PCI Devices"].append(pci_info)
-                    pci_count += 1
-                    if pci_count >= 20:  # Limit to 20 PCI devices
-                        break
-            except Exception:
-                continue
-        
-        # Get USB controllers (limited to prevent performance issues)
-        usb_count = 0
-        for dev in c.Win32_PnPEntity():
-            try:
-                if dev.PNPClass and "USB" in dev.PNPClass.upper():
-                    usb_info = {
-                        "Name": dev.Name,
-                        "Device ID": dev.DeviceID,
-                        "Manufacturer": dev.Manufacturer if hasattr(dev, 'Manufacturer') else "n/a",
-                        "Status": dev.Status if hasattr(dev, 'Status') else "n/a",
-                    }
-                    result["USB Controllers"].append(usb_info)
-                    usb_count += 1
-                    if usb_count >= 15:  # Limit to 15 USB controllers
-                        break
-            except Exception:
-                continue
-        
-        if not result["PCI Devices"] and not result["USB Controllers"]:
-            return {"Note": "No PCI/USB bus information available"}
-        
-        return result
+
+            # Get PCI devices (limited to prevent performance issues)
+            pci_count = 0
+            for dev in c.Win32_PnPEntity():
+                try:
+                    if dev.PNPClass and "PCI" in dev.PNPClass.upper():
+                        pci_info = {
+                            "Name": dev.Name,
+                            "Device ID": dev.DeviceID,
+                            "Manufacturer": dev.Manufacturer if hasattr(dev, 'Manufacturer') else "n/a",
+                            "Status": dev.Status if hasattr(dev, 'Status') else "n/a",
+                        }
+                        result["PCI Devices"].append(pci_info)
+                        pci_count += 1
+                        if pci_count >= 20:  # Limit to 20 PCI devices
+                            break
+                except Exception:
+                    continue
+
+            # Get USB controllers (limited to prevent performance issues)
+            usb_count = 0
+            for dev in c.Win32_PnPEntity():
+                try:
+                    if dev.PNPClass and "USB" in dev.PNPClass.upper():
+                        usb_info = {
+                            "Name": dev.Name,
+                            "Device ID": dev.DeviceID,
+                            "Manufacturer": dev.Manufacturer if hasattr(dev, 'Manufacturer') else "n/a",
+                            "Status": dev.Status if hasattr(dev, 'Status') else "n/a",
+                        }
+                        result["USB Controllers"].append(usb_info)
+                        usb_count += 1
+                        if usb_count >= 15:  # Limit to 15 USB controllers
+                            break
+                except Exception:
+                    continue
+
+            if not result["PCI Devices"] and not result["USB Controllers"]:
+                return {"Note": "No PCI/USB bus information available"}
+
+            return result
     except Exception as e:
         return {"Error": f"Could not retrieve PCI/USB info: {str(e)}"}
