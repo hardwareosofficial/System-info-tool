@@ -300,6 +300,23 @@ def get_battery_detailed_info() -> dict[str, Any]:
             cycle_count_match = re.search(r"Cycle Count:\s*(\d+)", out)
             if cycle_count_match:
                 result["Cycle Count"] = int(cycle_count_match.group(1))
+        # Try pmset for time remaining and percent
+        try:
+            pm = _run(["pmset", "-g", "batt"]) or ""
+            # Example: -InternalBattery-0 (id=1234567)    85%; discharging; 3:12 remaining
+            m = re.search(r"(\d+)%.*?;(?:\s*\w+;\s*)?(?:([0-9]+:\d+))? remaining", pm, re.I)
+            if m:
+                result.setdefault("Charge Remaining", f"{m.group(1)}%")
+                if m.group(2):
+                    # parse H:MM
+                    parts = m.group(2).split(":")
+                    try:
+                        hrs = int(parts[0]); mins = int(parts[1])
+                        result["Estimated Run Time (min)"] = hrs * 60 + mins
+                    except Exception:
+                        pass
+        except Exception:
+            pass
     except Exception:
         pass
     

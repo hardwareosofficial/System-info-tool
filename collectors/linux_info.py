@@ -281,6 +281,85 @@ def get_drivers_detail(limit: int = 60) -> list[dict[str, str]]:
     return modules
 
 
+def get_battery_detailed_info() -> dict[str, Any]:
+    """Get battery information from /sys/class/power_supply (Linux)."""
+    base = "/sys/class/power_supply"
+    result: dict[str, Any] = {}
+    try:
+        if not os.path.isdir(base):
+            return {"Note": "No power_supply sysfs present"}
+
+        bats = [d for d in os.listdir(base) if d.lower().startswith("bat") or d.lower().startswith("battery")]
+        if not bats:
+            # try filtering for devices with type "Battery"
+            for d in os.listdir(base):
+                t = _read(f"{base}/{d}/type")
+                if t and t.lower() == "battery":
+                    bats.append(d)
+        if not bats:
+            return {"Note": "No battery devices found"}
+
+        # Use first battery
+        bat = bats[0]
+        fields = {
+            "Status": "status",
+            "Charge Now": "charge_now",
+            "Charge Full": "charge_full",
+            "Energy Now": "energy_now",
+            "Energy Full": "energy_full",
+            "Power Now": "power_now",
+            "Current Now": "current_now",
+            "Voltage Now": "voltage_now",
+            "Manufacturer": "manufacturer",
+            "Model Name": "model_name",
+            "Serial Number": "serial_number",
+        }
+
+        for label, fname in fields.items():
+            val = _read(f"{base}/{bat}/{fname}")
+            if val:
+                result[label] = val
+
+        # Compute percentage if possible
+        try:
+            if "Charge Now" in result and "Charge Full" in result:
+                cn = int(result["Charge Now"])
+                cf = int(result["Charge Full"])
+                if cf > 0:
+                    result["Estimated Charge Remaining (%)"] = round((cn / cf) * 100, 1)
+        except Exception:
+            pass
+
+        # Estimated time and power using energy_now/power_now or charge/current
+        try:
+            if "Power Now" in result and result["Power Now"]:
+                # units are microWatts (uW) for power_now; energy in uWh
+                power_uw = int(result["Power Now"])
+                power_w = power_uw / 1_000_000.0
+                result["Power (W)"] = f"{power_w:.3f} W"
+                if "Energy Now" in result and result["Energy Now"]:
+                    energy_uwh = int(result["Energy Now"])
+                    hours = energy_uwh / power_uw if power_uw > 0 else None
+                    if hours is not None:
+                        mins = int(hours * 60)
+                        result["Estimated Run Time (min)"] = mins
+            elif "Current Now" in result and "Voltage Now" in result:
+                # current in uA, voltage in uV maybe — best-effort
+                try:
+                    cur_ua = int(result.get("Current Now", 0))
+                    volt_uv = int(result.get("Voltage Now", 0))
+                    power_w = (cur_ua * volt_uv) / 1_000_000_000.0
+                    result["Power (W)"] = f"{power_w:.3f} W (approx)"
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return result
+    except Exception:
+        return {"Error": "Could not read battery information from sysfs"}
+
+
 def get_network_hardware() -> list[dict[str, str]]:
     out = _run(["lspci"])
     nics = []
